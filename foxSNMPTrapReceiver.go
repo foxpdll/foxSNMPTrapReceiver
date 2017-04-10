@@ -37,6 +37,7 @@ const (
         GetBulkRequest                     = 0xa5
         TrapV2                             = 0xa7
         EndOfMibView                       = 0x82
+        snmp_snmpTrapOID                   = ".1.3.6.1.6.3.1.1.4.1.0"
         snmp_coldStart                     = ".1.3.6.1.6.3.1.1.5.1"
         snmp_warmStart                     = ".1.3.6.1.6.3.1.1.5.2"
         snmp_linkDown                      = ".1.3.6.1.6.3.1.1.5.3"
@@ -44,6 +45,8 @@ const (
         snmp_authenticationFailure         = ".1.3.6.1.6.3.1.1.5.5"
         snmp_egpNeighborLoss               = ".1.3.6.1.6.3.1.1.5.6"
         snmp_enterpriseSpecific            = ".1.3.6.1.6.3.1.1.5.7"
+        snmp_swPktStormOccurred            = ".1.3.6.1.4.1.171.12.25.5.0.1"
+        snmp_swPktStormCleared             = ".1.3.6.1.4.1.171.12.25.5.0.2"
 )
 
 type Asn1BER byte
@@ -446,24 +449,39 @@ func serveSNMP() {
                 //fmt.Println(snmpParse(buf[0:n]))
                 //              fmt.Println("Received from:", addr.IP.String())
                 pp := snmpParse(buf[0:n])
-                if pp.Version == "v2c" && pp.Variables[1].Name == ".1.3.6.1.6.3.1.1.4.1.0" && (pp.Variables[1].Value == snmp_linkDown || pp.Variables[1].Value == snmp_linkUp) {
+
+                if pp.Version == "v2c" {
+                        mutex.Lock()
+                        ma_com[addr.IP.String()] = pp.Community
+                        mutex.Unlock()
+                }
+
+                if pp.Version == "v2c" && pp.Variables[1].Name == snmp_snmpTrapOID && (pp.Variables[1].Value == snmp_linkDown || pp.Variables[1].Value == snmp_linkUp) {
                         //fmt.Print("Received from:", addr.IP.String()+"_"+strconv.Itoa(pp.Variables[2].Value.(int)), "\t")
                         mutex.Lock()
                         ma_ud[addr.IP.String()+"_"+strconv.Itoa(pp.Variables[2].Value.(int))] += 1
                         if ma_ud[addr.IP.String()+"_"+strconv.Itoa(pp.Variables[2].Value.(int))] > 1440 {
                                 ma_ud[addr.IP.String()+"_"+strconv.Itoa(pp.Variables[2].Value.(int))] -= 1
                         }
-                        ma_com[addr.IP.String()] = pp.Community
                         mutex.Unlock()
                         //                      fmt.Println(ma)
                 }
+
+                if pp.Version == "v2c" && pp.Variables[1].Name == snmp_snmpTrapOID && (pp.Variables[1].Value == snmp_swPktStormOccurred || pp.Variables[1].Value == snmp_swPktStormCleared) {
+                        //fmt.Print("Received from:", addr.IP.String()+"_"+strconv.Itoa(pp.Variables[2].Value.(int)), "\t")
+                        mutex.Lock()
+                        ma_loop[addr.IP.String()+"_"+strconv.Itoa(pp.Variables[2].Value.(int))] += 1
+//                        fmt.Println(addr.IP.String()+"_"+strconv.Itoa(pp.Variables[2].Value.(int)))
+                        mutex.Unlock()
+                }
+
                 //              fmt.Println(pp.Variables[1])
         }
         //      packet := []byte{48, 130, 0, 119, 2, 1, 1, 4, 4, 122, 116, 114, 119, 167, 130, 0, 106, 2, 3, 1, 8, 22, 2, 1, 0, 2, 1, 0, 48, 130, 0, 91, 48, 16, 6, 8, 43, 6, 1, 2, 1, 1, 3, 0, 67, 4, 6, 171, 37, 62, 48, 28, 6, 10, 43, 6, 1, 6, 3, 1, 1, 4, 1, 0, 6, 14, 43, 6, 1, 4, 1, 129, 43, 11, 64, 1, 2, 15, 0, 3, 48, 41, 6, 13, 43, 6, 1, 4, 1, 129, 43, 11, 64, 1, 2, 15, 1, 4, 24, 2, 16, 39, 190, 3, 29, 149, 0, 1, 0, 9, 0, 1, 16, 39, 190, 3, 29, 149, 0, 1, 0, 9, 0}
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-        fmt.Fprintf(w, "<html><head></head><body><a href=/flap>Flap</a><br><a href=/com>Community</a></body></html>")
+        fmt.Fprintf(w, "<html><head></head><body><a href=/flap>Flap</a><br><a href=/com>Community</a><br><a href=/loop>Loop</a></body></html>")
 }
 
 func handler_com(w http.ResponseWriter, r *http.Request) {
@@ -506,6 +524,28 @@ func handler_flap(w http.ResponseWriter, r *http.Request) {
         fmt.Fprintf(w, "</table></body></html>")
 }
 
+func handler_loop(w http.ResponseWriter, r *http.Request) {
+        fmt.Fprintf(w, "<html><head></head><body><h1>Таблица Петель</h1><table border=1>")
+        n := map[int][]string{}
+        var a []int
+        mutex.Lock()
+        for k, v := range ma_loop {
+                n[v] = append(n[v], k)
+        }
+        mutex.Unlock()
+        for k := range n {
+                a = append(a, k)
+        }
+        sort.Sort(sort.Reverse(sort.IntSlice(a)))
+        fmt.Fprintf(w, "<th>Количество петель</th><th>IP адрес комутатора</th><th>Порт</th>")
+        for _, k := range a {
+                for _, s := range n[k] {
+                         fmt.Fprintf(w, "<tr><td>%d</td><td><a href=http://217.107.196.60:81/checkIfaces/%s>%s</a></td></tr>\n", k, strings.Split(s, "_")[0], strings.Replace(s, "_", "</td><td>", 1))
+                }
+        }
+        fmt.Fprintf(w, "</table></body></html>")
+}
+
 func clearOLD(sec time.Duration) {
         for {
                 time.Sleep(sec * 1000000000)
@@ -518,21 +558,38 @@ func clearOLD(sec time.Duration) {
                 }
                 mutex.Unlock()
         }
-
 }
 
+func clearOLDloop(sec time.Duration) {
+        for {
+                time.Sleep(sec * 1000000000)
+                mutex.Lock()
+                for k, _ := range ma_loop {
+                        ma_loop[k] -= 1
+                        if ma_loop[k] < 1 {
+                                delete(ma_loop, k)
+                        }
+                }
+                mutex.Unlock()
+        }
+}
+
+var ma_loop map[string]int
 var ma_ud map[string]int
 var ma_com map[string]string
 var mutex sync.Mutex
 
 func main() {
+        ma_loop = make(map[string]int)
         ma_ud = make(map[string]int)
         ma_com = make(map[string]string)
         mutex = sync.Mutex{}
         http.HandleFunc("/", handler)
+        http.HandleFunc("/loop", handler_loop)
         http.HandleFunc("/flap", handler_flap)
         http.HandleFunc("/com", handler_com)
         go http.ListenAndServe(":85", nil)
         go clearOLD(60)
+        go clearOLDloop(3600)
         serveSNMP()
 }
